@@ -212,6 +212,16 @@ fn create_window(
         NSRect::new(NSPoint::new(left, bottom), NSSize::new(width, height))
       }
     };
+    let target_top_left = if screen.is_none() {
+      attrs.position.map(|position| {
+        let screen = screen_from_position(position)
+          .unwrap_or_else(|| appkit::NSScreen::mainScreen(mtm).unwrap());
+        let scale_factor = NSScreen::backingScaleFactor(&screen) as f64;
+        util::window_position(position.to_logical(scale_factor))
+      })
+    } else {
+      None
+    };
 
     let mut masks = if !attrs.decorations && screen.is_none() || pl_attrs.titlebar_hidden {
       // Resizable UnownedWindow without a titlebar or borders
@@ -244,15 +254,29 @@ fn create_window(
     }
 
     let ns_window: id = msg_send![WINDOW_CLASS.0, alloc];
-    let ns_window_ptr: id = msg_send![
-      ns_window,
-      initWithContentRect: frame,
-      styleMask: masks,
-      backing: NSBackingStoreType::Buffered,
-      defer: NO,
-    ];
+    let ns_window_ptr: id = if let Some(screen) = screen.as_ref() {
+      msg_send![
+        ns_window,
+        initWithContentRect: frame,
+        styleMask: masks,
+        backing: NSBackingStoreType::Buffered,
+        defer: NO,
+        screen: &**screen,
+      ]
+    } else {
+      msg_send![
+        ns_window,
+        initWithContentRect: frame,
+        styleMask: masks,
+        backing: NSBackingStoreType::Buffered,
+        defer: NO,
+      ]
+    };
 
     Retained::retain(ns_window_ptr).and_then(|r| r.downcast::<NSWindow>().ok()).map(|ns_window| {
+      if let Some(top_left) = target_top_left {
+        ns_window.setFrameTopLeftPoint(top_left);
+      }
       #[allow(deprecated)]
       {
         *((*ns_window_ptr).get_mut_ivar::<Bool>("focusable")) = attrs.focusable.into();
@@ -338,22 +362,61 @@ fn create_window(
 }
 
 fn screen_from_position(position: Position) -> Option<Retained<NSScreen>> {
+  let window_position = position.to_physical::<i32>(monitor::primary_monitor().scale_factor());
+
   for m in monitor::available_monitors() {
     let monitor_pos = m.position();
     let monitor_size = m.size();
 
-    // type annotations required for 32bit targets.
-    let window_position = position.to_physical::<i32>(m.scale_factor());
-
-    let is_in_monitor = monitor_pos.x <= window_position.x
-      && window_position.x < monitor_pos.x + monitor_size.width as i32
-      && monitor_pos.y <= window_position.y
-      && window_position.y < monitor_pos.y + monitor_size.height as i32;
-    if is_in_monitor {
+    if monitor_contains_position(monitor_pos, monitor_size, window_position) {
       return m.ns_screen();
     }
   }
   None
+}
+
+pub(crate) fn monitor_contains_position(
+  monitor_pos: PhysicalPosition<i32>,
+  monitor_size: PhysicalSize<u32>,
+  window_position: PhysicalPosition<i32>,
+) -> bool {
+  monitor_pos.x <= window_position.x
+    && window_position.x < monitor_pos.x + monitor_size.width as i32
+    && monitor_pos.y <= window_position.y
+    && window_position.y < monitor_pos.y + monitor_size.height as i32
+}
+
+#[cfg(test)]
+mod tests {
+  use super::monitor_contains_position;
+  use crate::dpi::{PhysicalPosition, PhysicalSize};
+
+  #[test]
+  fn matches_monitor_when_global_position_is_inside_bounds() {
+    assert!(monitor_contains_position(
+      PhysicalPosition::new(3840, 0),
+      PhysicalSize::new(1920, 1080),
+      PhysicalPosition::new(3840, 0)
+    ));
+  }
+
+  #[test]
+  fn supports_monitors_positioned_above_the_primary_display() {
+    assert!(monitor_contains_position(
+      PhysicalPosition::new(0, -1080),
+      PhysicalSize::new(1920, 1080),
+      PhysicalPosition::new(0, -1080)
+    ));
+  }
+
+  #[test]
+  fn rejects_positions_outside_monitor_bounds() {
+    assert!(!monitor_contains_position(
+      PhysicalPosition::new(3840, 0),
+      PhysicalSize::new(1920, 1080),
+      PhysicalPosition::new(200, 200)
+    ));
+  }
 }
 
 pub(super) fn get_ns_theme() -> Theme {

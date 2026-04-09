@@ -9,7 +9,7 @@ pub use self::{cursor::*, r#async::*};
 
 use std::ops::{BitAnd, Deref};
 
-use core_graphics::display::CGDisplay;
+use core_graphics::display::{CGDisplay, CGDisplayBounds};
 use objc2::{
   class,
   runtime::{AnyClass as Class, AnyObject as Object, Sel},
@@ -85,7 +85,7 @@ impl Clone for IdRef {
 // 1. translate the bottom-left window corner into the top-left window corner
 // 2. translate the coordinate from a bottom-left origin coordinate system to a top-left one
 pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
-  CGDisplay::main().pixels_high() as f64 - (rect.origin.y + rect.size.height)
+  desktop_max_y() - (rect.origin.y + rect.size.height)
 }
 
 /// Converts from tao screen-coordinates to macOS screen-coordinates.
@@ -94,15 +94,28 @@ pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
 pub fn window_position(position: LogicalPosition<f64>) -> NSPoint {
   NSPoint::new(
     position.x,
-    CGDisplay::main().pixels_high() as f64 - position.y,
+    desktop_max_y() - position.y,
   )
 }
 
 pub fn cursor_position() -> Result<PhysicalPosition<f64>, ExternalError> {
   let point: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
-  let y = CGDisplay::main().pixels_high() as f64 - point.y;
+  let y = desktop_max_y() - point.y;
   let point = LogicalPosition::new(point.x, y);
   Ok(point.to_physical(super::monitor::primary_monitor().scale_factor()))
+}
+
+fn desktop_max_y() -> f64 {
+  if let Ok(displays) = CGDisplay::active_displays() {
+    displays
+      .into_iter()
+      .map(|display| unsafe { CGDisplayBounds(display) })
+      .map(|bounds| bounds.origin.y + bounds.size.height)
+      .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+      .unwrap_or_else(|| CGDisplay::main().pixels_high() as f64)
+  } else {
+    CGDisplay::main().pixels_high() as f64
+  }
 }
 
 pub unsafe fn superclass<'a>(this: &'a Object) -> &'a Class {
